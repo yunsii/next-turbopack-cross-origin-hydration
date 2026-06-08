@@ -66,6 +66,17 @@ Measured dump: **6 resolvers = 0 relative + 6 cross-origin, all `resolved: true`
 
 The whole bug in one line: **the entry pre-creates resolvers keyed by `CHUNK_BASE_PATH + path`, but chunks resolve resolvers keyed by their actual `.src` — they only match when `CHUNK_BASE_PATH` equals the chunk's real origin.**
 
+### Why the two keys differ in the first place
+
+The two keys come from two independent sources:
+
+- The **entry** pre-creates each `otherChunk` resolver with `getChunkRelativeUrl(path)` = `CHUNK_BASE_PATH + path` — the *expected* URL, computed from the build-time baked constant.
+- A **chunk registers itself** with `(globalThis.TURBOPACK ||= []).push([document.currentScript, id, factory])`; `getChunkFromRegistration` reads `document.currentScript.getAttribute('src')` and `getUrlFromScript` returns it — the chunk's *actual* `<script src>` attribute, whatever the SSR HTML put there.
+
+Turbopack's implicit invariant is that these are always equal — it expects chunks at `CHUNK_BASE_PATH`, and the SSR emits `<script src>` from the same `assetPrefix`. The app's `_document` breaks it: it rewrites `<script src>` to a cross-origin CDN per host but leaves the baked `CHUNK_BASE_PATH` at the path-only value. (`getUrlFromScript` returns `chunk.src` verbatim — no normalization; `getPathFromScript` does try `src.startsWith(CHUNK_BASE_PATH) ? strip : src`, but a cross-origin src doesn't start with the relative `CHUNK_BASE_PATH`, so it isn't stripped either.)
+
+So the root is two-fold: **Turbopack assumes `<script src>` equals the baked `CHUNK_BASE_PATH` and has no normalization fallback (low fault-tolerance), and the app rewrites the src per-host without touching `CHUNK_BASE_PATH` (the trigger).**
+
 ## Solutions
 
 The goal in every case: make the baked `CHUNK_BASE_PATH` match the URL the chunks are actually loaded from.
