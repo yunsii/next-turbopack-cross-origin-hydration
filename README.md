@@ -22,6 +22,25 @@ If `CHUNK_BASE_PATH` is **origin-relative** (e.g. `"/sub/_next/"`) but the actua
 
 Turbopack's chunk layout is **non-deterministic** across builds (module→chunk assignment, chunk ids/order). Whether the entry happens to wait on a chunk that hits the key mismatch depends on that layout, so **whether the page hangs is a per-build lottery**. Rebuilding the same commit — or editing an unrelated file and rebuilding — just re-rolls the layout, which is why it sometimes "fixes itself". The latent mismatch is always there; fixing `CHUNK_BASE_PATH` removes the lottery entirely.
 
+## What exactly hangs (traced)
+
+Expose the runtime resolver map — append `globalThis.__RES = chunkResolvers;` to the `const chunkResolvers = new Map();` line in `.next/static/chunks/turbopack-*.js` (the runtime is readable because `experimental.turbopackMinify` is off) — then load each build and dump `[...__RES.entries()].map(([k, v]) => [k, v.resolved])`. The `resolver.resolved` flag is built into the runtime.
+
+**BREAK** — the same chunk ends up registered under **two different keys**, and the entry awaits the relative one, which never resolves:
+
+| key | `resolved` |
+|---|---|
+| `/sub/_next/static/chunks/0ri4w9.v7l.xv.js` — **relative**, pre-created by the entry via `getChunkRelativeUrl(path)` = `CHUNK_BASE_PATH + path` | **`false`** ← the entry's `loadInitialChunk` awaits this |
+| `http://cdn.local:3000/sub/_next/static/chunks/0ri4w9.v7l.xv.js` — **cross-origin**, created when the chunk registered via `getUrlFromScript(chunk)` = `chunk.src` | `true` |
+
+Measured dump: **9 resolvers = 3 relative (all `resolved: false`, pending) + 6 cross-origin (all `true`)**. `Promise.all(otherChunks.map(loadInitialChunk))` waits on the 3 pending relative resolvers → hangs forever → `runtimeModuleIds` never instantiate → `window.next` stays `undefined`.
+
+**FIX** — `CHUNK_BASE_PATH = "http://cdn.local:3000/sub/_next/"`, so `getChunkRelativeUrl` produces the **same cross-origin key** the chunk registers under.
+
+Measured dump: **6 resolvers = 0 relative + 6 cross-origin, all `resolved: true`, none pending** → `Promise.all` resolves → the entry instantiates → hydrates.
+
+The whole bug in one line: **the entry pre-creates resolvers keyed by `CHUNK_BASE_PATH + path`, but chunks resolve resolvers keyed by their actual `.src` — they only match when `CHUNK_BASE_PATH` equals the chunk's real origin.**
+
 ## Solutions
 
 The goal in every case: make the baked `CHUNK_BASE_PATH` match the URL the chunks are actually loaded from.
