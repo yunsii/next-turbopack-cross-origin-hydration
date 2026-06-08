@@ -22,9 +22,51 @@ If `CHUNK_BASE_PATH` is **origin-relative** (e.g. `"/sub/_next/"`) but the actua
 
 Turbopack's chunk layout is **non-deterministic** across builds (module→chunk assignment, chunk ids/order). Whether the entry happens to wait on a chunk that hits the key mismatch depends on that layout, so **whether the page hangs is a per-build lottery**. Rebuilding the same commit — or editing an unrelated file and rebuilding — just re-rolls the layout, which is why it sometimes "fixes itself". The latent mismatch is always there; fixing `CHUNK_BASE_PATH` removes the lottery entirely.
 
-## The fix
+## Solutions
 
-Make the baked `CHUNK_BASE_PATH` match the URL the chunks are actually loaded from — i.e. set the **build-time** `assetPrefix` to the full cross-origin CDN URL, instead of an origin-relative path. Turbopack can only do this at build time (single value); per-host runtime injection of the chunk base path is not supported.
+The goal in every case: make the baked `CHUNK_BASE_PATH` match the URL the chunks are actually loaded from.
+
+### 1. Static — bake the full cross-origin URL (preferred)
+
+Set the **build-time** `assetPrefix` to the full cross-origin CDN URL (not an origin-relative path), so Turbopack bakes a matching `CHUNK_BASE_PATH`:
+
+```js
+// next.config.js
+module.exports = {
+  assetPrefix: 'https://cdn.example.com/sub', // full URL, not "/sub"
+}
+```
+
+Simplest and deterministic: `CHUNK_BASE_PATH` always equals the chunk origin, so hydration no longer depends on the (non-deterministic) chunk layout. This is the `AP=…` (FIX) mode in this repo.
+
+**Limitation:** `assetPrefix` is a single build-time value. If **one build must serve multiple hostnames, each from a different CDN origin**, this can't express that — Turbopack has no runtime public path. In that case either use one shared CDN for all hosts, or build once per CDN origin.
+
+### 2. Per-host at runtime — patch `CHUNK_BASE_PATH` to read a global (workaround)
+
+If you genuinely need per-host CDN origins from a **single** build, Turbopack doesn't support it natively, but you can patch it in. Verified working with both minified and unminified output.
+
+**a. Post-build**, rewrite the baked constant so it reads a runtime global, with the build-time value as fallback:
+
+```bash
+# CHUNK_BASE_PATH = "/sub/_next/"   →   = (globalThis.__CB__ || "/sub/_next/")
+sed -i 's#="/sub/_next/"#=(globalThis.__CB__||"/sub/_next/")#g' .next/static/chunks/turbopack-*.js
+```
+
+Match the **string literal assignment**, not the variable name: the var gets renamed by minification but the `"/sub/_next/"` literal survives. There may be two occurrences (`CHUNK_BASE_PATH` and `RUNTIME_PUBLIC_PATH`) — patch both.
+
+**b. In `_document`**, inject the per-host value as an inline script that runs **before** the chunk scripts (first child of `<Head>`):
+
+```tsx
+<script
+  dangerouslySetInnerHTML={{
+    __html: `globalThis.__CB__=${JSON.stringify(perHostCdnBase + '/_next/')}`,
+  }}
+/>
+```
+
+Each host's runtime then reads its own CDN base from `globalThis.__CB__`. **Fallback:** a host that injects nothing falls back to the baked origin-relative value (`"/sub/_next/"`) and loads chunks **same-origin** — which is fine, because same-origin relative `CHUNK_BASE_PATH` is self-consistent (no cross-origin mismatch).
+
+It's a hack (it patches Turbopack's emitted output), but it fills the gap left by the missing `__webpack_public_path__` equivalent.
 
 ## Reproduce
 
