@@ -24,6 +24,31 @@ Turbopack's chunk layout is **non-deterministic** across builds (module→chunk 
 
 ## What exactly hangs (traced)
 
+```mermaid
+flowchart TB
+  subgraph BREAK["❌ BREAK — CHUNK_BASE_PATH = /sub/_next/ (relative)"]
+    direction TB
+    EB["page entry<br>Promise.all waits on chunk X"]
+    CB["chunk X script runs and registers"]
+    KA["resolver A<br>key = /sub/_next/X.js<br>(relative · CHUNK_BASE_PATH + path)<br>resolved = false ⏳"]
+    KB["resolver B<br>key = cdn.local/sub/_next/X.js<br>(cross-origin · chunk.src)<br>resolved = true ✓"]
+    EB -->|awaits this key| KA
+    CB -->|resolves this key| KB
+    KA -->|never resolves, hangs| HB["entry not instantiated<br>NO hydration"]
+  end
+  subgraph FIX["✅ FIX — CHUNK_BASE_PATH = cdn.local/sub/_next/ (full)"]
+    direction TB
+    EF["page entry<br>Promise.all waits on chunk X"]
+    CF["chunk X script runs and registers"]
+    KC["resolver<br>key = cdn.local/sub/_next/X.js<br>(entry and chunk agree)<br>resolved = true ✓"]
+    EF -->|awaits this key| KC
+    CF -->|resolves this key| KC
+    KC -->|resolves| HF["entry instantiated<br>hydration"]
+  end
+```
+
+> BREAK: the entry and the chunk point at **two different resolver boxes** (same chunk, two keys) → the one the entry awaits never resolves. FIX: both point at the **same box** → it resolves.
+
 Expose the runtime resolver map — append `globalThis.__RES = chunkResolvers;` to the `const chunkResolvers = new Map();` line in `.next/static/chunks/turbopack-*.js` (the runtime is readable because `experimental.turbopackMinify` is off) — then load each build and dump `[...__RES.entries()].map(([k, v]) => [k, v.resolved])`. The `resolver.resolved` flag is built into the runtime.
 
 **BREAK** — the same chunk ends up registered under **two different keys**, and the entry awaits the relative one, which never resolves:
